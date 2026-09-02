@@ -785,32 +785,32 @@ export class InteractiveMode implements InteractiveModeContext {
 	focusAgentSession(id: string): Promise<void> {
 		return this.#focusController.focusAgent(id);
 	}
-	#configuredAgentNames: string[] | undefined;
+	#configuredAgents: Awaited<ReturnType<typeof discoverAgents>>["agents"] | undefined;
 	#configuredAgentIndex = -1;
 	async cycleConfiguredAgent(): Promise<void> {
-		if (!this.#configuredAgentNames) {
+		if (!this.#configuredAgents) {
 			const { agents } = await discoverAgents(
 				this.session.sessionManager.getCwd(),
 				undefined,
 				this.session.effectiveExtensionRoots,
 			);
 			const disabled = new Set(this.settings.get("task.disabledAgents") ?? []);
-			this.#configuredAgentNames = agents.filter(agent => !disabled.has(agent.name)).map(agent => agent.name);
+			this.#configuredAgents = agents.filter(agent => !disabled.has(agent.name));
 		}
-		if (this.#configuredAgentNames.length === 0) {
+		if (this.#configuredAgents.length === 0) {
 			this.showStatus("No enabled configured agents available");
 			return;
 		}
 		const current = this.session.getSelectedTaskAgent?.();
 		if (current) {
-			const currentIndex = this.#configuredAgentNames.indexOf(current);
+			const currentIndex = this.#configuredAgents.findIndex(agent => agent.name === current);
 			if (currentIndex >= 0) this.#configuredAgentIndex = currentIndex;
 		}
-		this.#configuredAgentIndex = (this.#configuredAgentIndex + 1) % this.#configuredAgentNames.length;
-		const next = this.#configuredAgentNames[this.#configuredAgentIndex];
+		this.#configuredAgentIndex = (this.#configuredAgentIndex + 1) % this.#configuredAgents.length;
+		const next = this.#configuredAgents[this.#configuredAgentIndex];
 		if (next) {
-			this.session.setSelectedTaskAgent?.(next);
-			this.showStatus(`Selected agent ${next} for the next task`);
+			this.session.setActiveTaskAgent(next.name, next.systemPrompt);
+			this.showStatus(`Selected agent ${next.name} for this session`);
 		}
 	}
 	focusParentSession(): Promise<void> {

@@ -501,6 +501,13 @@ export class AgentSession {
 	getSelectedTaskAgent(): string | undefined {
 		return this.#selectedTaskAgent;
 	}
+
+	/** Apply a configured agent's instructions to the current interactive session. */
+	setActiveTaskAgent(name: string | undefined, systemPrompt?: string): void {
+		this.#selectedTaskAgent = name;
+		const base = this.#tools.baseSystemPrompt;
+		this.agent.setSystemPrompt(systemPrompt?.trim() ? [...base, systemPrompt] : base);
+	}
 	setSelectedTaskAgent(name: string | undefined): void {
 		this.#selectedTaskAgent = name;
 	}
