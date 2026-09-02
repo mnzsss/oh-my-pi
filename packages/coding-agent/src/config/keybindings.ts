@@ -192,7 +192,7 @@ export const KEYBINDINGS = {
 		description: "Open the agent hub",
 	},
 	"app.agents.cycleForward": {
-		defaultKeys: "tab",
+		defaultKeys: "shift+tab",
 		description: "Select the next configured agent",
 	},
 	"app.session.observe": {
