@@ -196,6 +196,10 @@ const modelSegment: StatusLineSegment = {
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
 		let tail = "";
+		const selectedTaskAgent = ctx.session.getSelectedTaskAgent?.();
+		if (selectedTaskAgent) {
+			tail += `${theme.sep.dot}${theme.icon.agents} ${selectedTaskAgent}`;
+		}
 		if (ctx.session.isFastModeActive() && theme.icon.fast) {
 			tail += ` ${theme.icon.fast}`;
 		}
