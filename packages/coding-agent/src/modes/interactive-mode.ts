@@ -784,6 +784,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	focusAgentSession(id: string): Promise<void> {
 		return this.#focusController.focusAgent(id);
 	}
+	cycleAgentSession(): Promise<void> {
+		return this.#focusController.focusNextAgent();
+	}
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
 	}

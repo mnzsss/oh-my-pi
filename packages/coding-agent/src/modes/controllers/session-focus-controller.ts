@@ -62,6 +62,15 @@ export class SessionFocusController {
 		return this.unfocus();
 	}
 
+	/** Focus the next live subagent in stable registry order, wrapping around. */
+	async focusNextAgent(): Promise<void> {
+		const visible = this.registry.listVisibleTo(MAIN_AGENT_ID);
+		if (visible.length === 0) return;
+		const currentIndex = this.#focusedAgentId ? visible.findIndex(ref => ref.id === this.#focusedAgentId) : -1;
+		const next = visible[(currentIndex + 1) % visible.length];
+		if (next) await this.focusAgent(next.id);
+	}
+
 	/** Return to the main session. No-op when unfocused. */
 	async unfocus(): Promise<void> {
 		if (!this.#focusedAgentId) return;

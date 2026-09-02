@@ -489,6 +489,8 @@ export class InputController {
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
 		this.ctx.editor.onCycleModelBackward = () => this.cycleRoleModel("backward");
+		this.ctx.editor.setActionKeys("app.agents.cycleForward", this.ctx.keybindings.getKeys("app.agents.cycleForward"));
+		this.ctx.editor.onCycleAgentForward = () => void this.ctx.cycleAgentSession();
 		this.ctx.editor.setActionKeys(
 			"app.model.selectTemporary",
 			this.ctx.keybindings.getKeys("app.model.selectTemporary"),

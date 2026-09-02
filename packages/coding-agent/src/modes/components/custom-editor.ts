@@ -37,6 +37,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.cycleBackward"
 	| "app.model.select"
 	| "app.model.selectTemporary"
+	| "app.agents.cycleForward"
 	| "app.tools.toggleVisibility"
 	| "app.thinking.toggle"
 	| "app.editor.external"
@@ -59,6 +60,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.cycleBackward": ["shift+ctrl+p"],
 	"app.model.select": ["alt+m"],
 	"app.model.selectTemporary": ["alt+p"],
+	"app.agents.cycleForward": ["tab"],
 	"app.tools.toggleVisibility": ["ctrl+shift+o"],
 	"app.thinking.toggle": ["ctrl+t"],
 	"app.editor.external": ["ctrl+g"],
@@ -691,6 +693,7 @@ export class CustomEditor extends Editor {
 	onCycleThinkingLevel?: () => void;
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
+	onCycleAgentForward?: () => void;
 	onSelectModel?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
@@ -1062,6 +1065,11 @@ export class CustomEditor extends Editor {
 			// Intercept configured forward model cycling
 			if (this.#matchesAction(canonical, "app.model.cycleForward") && this.onCycleModelForward) {
 				this.onCycleModelForward();
+				return;
+			}
+
+			if (this.#matchesAction(canonical, "app.agents.cycleForward") && this.onCycleAgentForward) {
+				this.onCycleAgentForward();
 				return;
 			}
 
