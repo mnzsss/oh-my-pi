@@ -40,7 +40,6 @@ interface AppKeybindings {
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
 	"app.agents.hub": true;
-	"app.agents.cycleForward": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -108,7 +107,7 @@ export const KEYBINDINGS = {
 		description: "Toggle thinking mode",
 	},
 	"app.model.cycleForward": {
-		defaultKeys: "ctrl+p",
+		defaultKeys: ["ctrl+p", "tab"],
 		description: "Cycle to next model",
 	},
 	"app.model.cycleBackward": {
@@ -190,10 +189,6 @@ export const KEYBINDINGS = {
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
 		description: "Open the agent hub",
-	},
-	"app.agents.cycleForward": {
-		defaultKeys: "tab",
-		description: "Focus the next agent",
 	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
