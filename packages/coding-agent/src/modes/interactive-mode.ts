@@ -58,7 +58,7 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
-import { formatModelString, resolveModelOverride, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -809,26 +809,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#configuredAgentIndex = (this.#configuredAgentIndex + 1) % this.#configuredAgents.length;
 		const next = this.#configuredAgents[this.#configuredAgentIndex];
 		if (next) {
-			let modelChanged = false;
-			const modelPattern = next.model?.[0];
-			if (modelPattern) {
-				const resolved = resolveModelOverride([modelPattern], this.session.modelRegistry, this.settings);
-				if (resolved.model) {
-					try {
-						await this.session.setModel(resolved.model, `agent:${next.name}`, {
-							persist: false,
-						});
-						modelChanged = true;
-					} catch (error) {
-						this.showStatus(
-							`Agent ${next.name} selected; model unchanged (${error instanceof Error ? error.message : String(error)})`,
-						);
-						return;
-					}
-				}
-			}
 			this.session.setActiveTaskAgent(next.name, next.systemPrompt);
-			this.showStatus(`Selected agent ${next.name} for this session${modelChanged ? ` (${next.model?.[0]})` : ""}`);
+			this.showStatus(`Selected agent ${next.name} for this session (default model)`);
 		}
 	}
 	focusParentSession(): Promise<void> {
