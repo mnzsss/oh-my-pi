@@ -317,6 +317,9 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
+	/** Session-local configured task agent selected by the interactive UI. */
+	getSelectedTaskAgent?: () => string | undefined;
+	setSelectedTaskAgent?: (name: string | undefined) => void;
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */

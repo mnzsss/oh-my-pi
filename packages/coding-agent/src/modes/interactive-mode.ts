@@ -192,6 +192,7 @@ import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
+import { discoverAgents } from "../task/discovery";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
@@ -783,6 +784,34 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	focusAgentSession(id: string): Promise<void> {
 		return this.#focusController.focusAgent(id);
+	}
+	#configuredAgentNames: string[] | undefined;
+	#configuredAgentIndex = -1;
+	async cycleConfiguredAgent(): Promise<void> {
+		if (!this.#configuredAgentNames) {
+			const { agents } = await discoverAgents(
+				this.session.sessionManager.getCwd(),
+				undefined,
+				this.session.effectiveExtensionRoots,
+			);
+			const disabled = new Set(this.settings.get("task.disabledAgents") ?? []);
+			this.#configuredAgentNames = agents.filter(agent => !disabled.has(agent.name)).map(agent => agent.name);
+		}
+		if (this.#configuredAgentNames.length === 0) {
+			this.showStatus("No enabled configured agents available");
+			return;
+		}
+		const current = this.session.getSelectedTaskAgent?.();
+		if (current) {
+			const currentIndex = this.#configuredAgentNames.indexOf(current);
+			if (currentIndex >= 0) this.#configuredAgentIndex = currentIndex;
+		}
+		this.#configuredAgentIndex = (this.#configuredAgentIndex + 1) % this.#configuredAgentNames.length;
+		const next = this.#configuredAgentNames[this.#configuredAgentIndex];
+		if (next) {
+			this.session.setSelectedTaskAgent?.(next);
+			this.showStatus(`Selected agent ${next} for the next task`);
+		}
 	}
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();

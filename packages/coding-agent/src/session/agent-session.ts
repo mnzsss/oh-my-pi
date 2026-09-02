@@ -497,6 +497,13 @@ const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
 export class AgentSession {
+	#selectedTaskAgent: string | undefined;
+	getSelectedTaskAgent(): string | undefined {
+		return this.#selectedTaskAgent;
+	}
+	setSelectedTaskAgent(name: string | undefined): void {
+		this.#selectedTaskAgent = name;
+	}
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;

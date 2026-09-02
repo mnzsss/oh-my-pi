@@ -36,7 +36,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"**Other**",
 		"| Key | Action |",
 		"|-----|--------|",
-		`| \`${appKey(bindings, "app.model.cycleForward")}\` | Cycle configured agents/models |`,
+		`| \`${appKey(bindings, "app.agents.cycleForward")}\` | Select next configured agent for the next task |`,
 		`| \`${appKey(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${appKey(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
 		`| \`${appKey(bindings, "app.exit")}\` | Exit (saves current prompt as draft) |`,
