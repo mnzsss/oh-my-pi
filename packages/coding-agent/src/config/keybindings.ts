@@ -108,7 +108,7 @@ export const KEYBINDINGS = {
 		description: "Toggle thinking mode",
 	},
 	"app.model.cycleForward": {
-		defaultKeys: ["ctrl+p", "tab"],
+		defaultKeys: "ctrl+p",
 		description: "Cycle to next model",
 	},
 	"app.model.cycleBackward": {
