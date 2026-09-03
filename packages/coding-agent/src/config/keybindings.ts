@@ -100,7 +100,7 @@ export const KEYBINDINGS = {
 		description: "Reset terminal display",
 	},
 	"app.thinking.cycle": {
-		defaultKeys: "shift+tab",
+		defaultKeys: [],
 		description: "Cycle thinking level",
 	},
 	"app.thinking.toggle": {
