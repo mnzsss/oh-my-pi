@@ -3,7 +3,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import {
+	type Context,
+	Effort,
+	type FetchImpl,
+	type Model,
+	type OpenAICompat,
+	type ThinkingConfig,
+} from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -11,6 +18,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry", () => {
@@ -1213,6 +1221,31 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			expect(anthropicModels.some(m => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
+		});
+
+		test("custom model imageBudget lifts the unknown-provider image cap on outgoing requests", () => {
+			writeRawModelsJson({
+				router: {
+					baseUrl: "http://localhost:20128/v1",
+					api: "openai-completions",
+					auth: "none",
+					models: [{ id: "plan", input: ["text", "image"], imageBudget: 200 }],
+				},
+			});
+			const model = new ModelRegistry(authStorage, modelsJsonPath).find("router", "plan");
+			if (!model) throw new Error("Expected router/plan to resolve from models config");
+			const images = Array.from({ length: 6 }, (_, index) => ({
+				type: "image" as const,
+				data: `image-${index}`,
+				mimeType: "image/png",
+			}));
+			const context: Context = {
+				systemPrompt: [],
+				tools: [],
+				messages: [{ role: "user", content: images, timestamp: 0 }],
+			};
+
+			expect(clampProviderContextImages(context, model).messages[0]?.content).toEqual(images);
 		});
 	});
 

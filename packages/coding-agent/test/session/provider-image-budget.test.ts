@@ -152,4 +152,51 @@ describe("provider context image budgets", () => {
 
 		expect(clampProviderContextImages(context, UMANS_MODEL)).toBe(context);
 	});
+
+	it("does not strip archive frames from an already-sent message when the model declares a larger image budget", () => {
+		const routerModel = buildModel({
+			id: "plan",
+			name: "plan",
+			api: "openai-completions",
+			provider: "router",
+			baseUrl: "http://localhost:20128/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 872000,
+			maxTokens: 128000,
+			imageBudget: 200,
+		});
+		const previousRequest: Context = {
+			systemPrompt: ["system"],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: [text("archived history"), ...Array.from({ length: 5 }, (_, index) => image(`frame-${index}`))],
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("continue")], timestamp: 1 },
+			],
+		};
+		const nextRequest: Context = {
+			...previousRequest,
+			messages: [
+				...previousRequest.messages,
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [image("screenshot")],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+
+		const sentBefore = clampProviderContextImages(previousRequest, routerModel);
+		const sentAfter = clampProviderContextImages(nextRequest, routerModel);
+
+		expect(sentAfter.messages.slice(0, sentBefore.messages.length)).toEqual(sentBefore.messages);
+	});
 });
