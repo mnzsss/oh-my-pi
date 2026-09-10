@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `imageBudget` to custom models and `modelOverrides` in models.yml. Raise it for proxies whose upstream accepts more than 5 images: past the cap, omp drops the oldest images, rewriting the prompt prefix and losing the prompt cache.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

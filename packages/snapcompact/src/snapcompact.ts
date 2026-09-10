@@ -519,14 +519,18 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/** Per-request image budget: `imageBudget` if declared, else `provider`'s entry; unknown providers get the floor. */
+export function providerImageBudget(provider: string | undefined, imageBudget?: number): number {
+	return (
+		imageBudget ??
+		(provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ??
+		DEFAULT_PROVIDER_IMAGE_BUDGET
+	);
 }
 
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+export function providerFrameBudget(provider: string | undefined, imageBudget?: number): number {
+	return Math.min(providerImageBudget(provider, imageBudget), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

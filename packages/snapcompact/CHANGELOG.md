@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `imageBudget` argument to `providerImageBudget()` and `providerFrameBudget()` that overrides the provider table.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

@@ -196,10 +196,14 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
 		"remoteCompaction?": RemoteCompactionSchema,
+		"imageBudget?": "number",
 	}).narrow((value, ctx) => {
 		// Enforce id non-empty
 		if (typeof value.id === "string" && value.id.length === 0) {
 			return ctx.mustBe("id a non-empty string");
+		}
+		if (value.imageBudget !== undefined && (!Number.isInteger(value.imageBudget) || value.imageBudget <= 0)) {
+			return ctx.mustBe("imageBudget a positive integer");
 		}
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 			return ctx.mustBe("name a non-empty string");
@@ -248,9 +252,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
 		"remoteCompaction?": RemoteCompactionSchema,
+		"imageBudget?": "number",
 	}).narrow((value, ctx) => {
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 			return ctx.mustBe("name a non-empty string");
+		}
+		if (value.imageBudget !== undefined && (!Number.isInteger(value.imageBudget) || value.imageBudget <= 0)) {
+			return ctx.mustBe("imageBudget a positive integer");
 		}
 		if (
 			value.contextPromotionTarget !== undefined &&
