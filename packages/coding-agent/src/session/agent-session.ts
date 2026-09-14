@@ -806,13 +806,24 @@ export class AgentSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
-	/** Resolves when the currently in-flight `switchSession()` transition settles (success or
-	 *  rollback). newSession() never rolls #sessionGeneration back so it leaves this unset. An
-	 *  aside-queueing call that hits a #sessionGeneration mismatch awaits this (via
-	 *  #sessionGenerationChanged) before giving up, so a record for the still-live session isn't
-	 *  discarded moments before a rolled-back switchSession() restores the exact generation it
-	 *  was captured against. */
+	/** Settles when switchSession commits or restores its previous generation on rollback.
+	 *  newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
+	#sessionGenerationSettled: Promise<void> | undefined;
+	/** Readiness barrier for the outermost session/transcript transition, including all
+	 *  hooks and rollback reconciliation, independently of when its generation settles. */
 	#sessionTransitionSettled: Promise<void> | undefined;
+	#resolveSessionTransition: (() => void) | undefined;
+	#sessionTransitionDepth = 0;
+	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
+	readonly #sessionTransitionScope: Disposable = {
+		[Symbol.dispose]: () => {
+			if (--this.#sessionTransitionDepth !== 0) return;
+			const resolve = this.#resolveSessionTransition;
+			this.#sessionTransitionSettled = undefined;
+			this.#resolveSessionTransition = undefined;
+			resolve?.();
+		},
+	};
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -1001,15 +1012,15 @@ export class AgentSession {
 		}
 	}
 
-	/** Re-validates a #sessionGeneration snapshot captured before an aside-queueing call's
-	 *  normalization await. A mismatch alone does not mean the record's source session is gone —
+	/** Re-validates a #sessionGeneration snapshot captured before an aside/SDK call's await.
+	 *  A mismatch alone does not mean the record's source session is gone —
 	 *  switchSession() restores the exact prior generation on rollback — so wait out any in-flight
-	 *  transition (#sessionTransitionSettled) and recheck rather than discarding immediately.
+	 *  generation change (#sessionGenerationSettled) and recheck rather than discarding immediately.
 	 *  Returns true when the caller should drop its record (no in-flight transition to wait for, or
 	 *  the generation is still different once one settles); false once the generation matches again. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
 		while (this.#sessionGeneration !== sessionGeneration) {
-			const settled = this.#sessionTransitionSettled;
+			const settled = this.#sessionGenerationSettled;
 			if (!settled) return true;
 			await settled;
 		}
@@ -1831,6 +1842,7 @@ export class AgentSession {
 			contextPrompt: config.advisorContextPrompt,
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
+			configWarnings: config.advisorConfigWarnings,
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
 		});
@@ -3092,6 +3104,12 @@ export class AgentSession {
 			this.#recordToolExecutionStart(event);
 		}
 
+		// Both buffer resets run before the awaited fan-out: event handlers run
+		// concurrently and message_update skips the await, so a reset placed after
+		// it could land behind the new message's first deltas and clear them.
+		if (event.type === "turn_start") this.#ttsr.onTurnStart();
+		if (event.type === "message_start" && event.message.role === "assistant") this.#ttsr.onAssistantMessageStart();
+
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
@@ -3114,8 +3132,6 @@ export class AgentSession {
 				throw error;
 			}
 		}
-
-		if (event.type === "turn_start") this.#ttsr.onTurnStart();
 
 		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
@@ -4357,6 +4373,25 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
+	/** True while a session identity or transcript transition is still applying or rolling back. */
+	get isSessionTransitioning(): boolean {
+		return this.#sessionTransitionDepth > 0;
+	}
+
+	/** Wait until all active session/transcript transitions have settled, including rollback. */
+	async waitForSessionTransition(): Promise<void> {
+		while (this.#sessionTransitionSettled) await this.#sessionTransitionSettled;
+	}
+
+	#beginSessionTransition(): Disposable {
+		if (this.#sessionTransitionDepth++ === 0) {
+			const settled = Promise.withResolvers<void>();
+			this.#sessionTransitionSettled = settled.promise;
+			this.#resolveSessionTransition = settled.resolve;
+		}
+		return this.#sessionTransitionScope;
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -4915,6 +4950,7 @@ export class AgentSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
+		using _transition = this.#beginSessionTransition();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
 		// recordPythonResult(), which append directly to agent.state when not
@@ -7868,6 +7904,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -7997,6 +8034,7 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
@@ -8027,6 +8065,9 @@ export class AgentSession {
 			// Fork the session (creates new session file with same entries)
 			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 			try {
+				// No file means fork() is a no-op. Otherwise invalidate admitted
+				// prompt setup before the asynchronous identity rewrite begins.
+				if (previousSessionFile) this.#promptGeneration++;
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
@@ -8856,6 +8897,9 @@ export class AgentSession {
 	 */
 	async runEphemeralTurn(args: {
 		promptText: string;
+		history?: readonly Message[];
+		/** Session-local key for serialized side turns; rotate after cancellation or failure. */
+		conversationKey?: string;
 		onTextDelta?: (delta: string) => void;
 		signal?: AbortSignal;
 		dedupeReply?: boolean;
@@ -8865,7 +8909,7 @@ export class AgentSession {
 			throw new Error("No active model on session");
 		}
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
 		const options = this.prepareSimpleStreamOptions(
@@ -8874,10 +8918,12 @@ export class AgentSession {
 				// Side-channel turns must not share OpenAI/Codex append-only
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
-				// stable, but give provider routing a unique request lineage. The
-				// shared provider state map is still required so Codex can allocate
-				// websocket state under that side-channel session id.
-				sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+				// stable, but isolate provider routing from the main conversation.
+				// Serialized BTW follow-ups reuse a topic-specific lineage; standalone
+				// side requests retain their unique request lineage.
+				sessionId: args.conversationKey
+					? `${cacheSessionId}:side:conversation:${args.conversationKey}`
+					: `${cacheSessionId}:side:${Snowflake.next()}`,
 				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
 				preferWebsockets: this.#preferWebsockets,
 				providerSessionState: this.#providerSessionState,
@@ -8946,10 +8992,10 @@ export class AgentSession {
 	/**
 	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
 	 * the in-flight streaming assistant message (if any) so the model sees
-	 * the partial response in context, then appends the prompt as a virtual
-	 * user message.
+	 * the partial response in context, then appends detached side-channel history
+	 * and the current prompt after the no-tools reminder.
 	 */
-	#buildEphemeralSnapshot(promptText: string): AgentMessage[] {
+	#buildEphemeralSnapshot(promptText: string, history?: readonly Message[]): AgentMessage[] {
 		const messages = [...this.messages];
 		const streaming = this.agent.state.streamMessage;
 		if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
@@ -8986,6 +9032,10 @@ export class AgentSession {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
+		if (history?.length) {
+			// Detach before the conversion pipeline can await or mutate caller-owned messages.
+			messages.push(...structuredClone(history));
+		}
 		messages.push({
 			role: "user",
 			content: [{ type: "text", text: promptText }],
@@ -9025,6 +9075,7 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -9101,9 +9152,9 @@ export class AgentSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
-		const transitionSettled = Promise.withResolvers<void>();
-		const previousSessionTransitionSettled = this.#sessionTransitionSettled;
-		this.#sessionTransitionSettled = transitionSettled.promise;
+		const generationSettled = Promise.withResolvers<void>();
+		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
+		this.#sessionGenerationSettled = generationSettled.promise;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -9285,8 +9336,8 @@ export class AgentSession {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
+			generationSettled.resolve();
+			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -9301,8 +9352,8 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
+			generationSettled.resolve();
+			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
@@ -9386,6 +9437,7 @@ export class AgentSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -9431,6 +9483,8 @@ export class AgentSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				// Pending prompt setup belongs to the history being replaced.
+				this.#promptGeneration++;
 				if (!selectedEntry.parentId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -9490,6 +9544,7 @@ export class AgentSession {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
@@ -9562,6 +9617,9 @@ export class AgentSession {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
+				// A prompt may have been admitted during the flush/drain awaits
+				// after the idle check. It still belongs to the pre-branch context.
+				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -9675,6 +9733,7 @@ export class AgentSession {
 		 */
 		askReanswerCommitted?: boolean;
 	}> {
+		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
 
@@ -9824,6 +9883,10 @@ export class AgentSession {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
+
+		// All cancellation/no-op exits are behind us. Invalidate prompt setup
+		// admitted on the abandoned branch before committing any tree changes.
+		this.#promptGeneration++;
 
 		// Determine the new leaf position based on target type
 		let newLeafId: string | null;
@@ -10806,6 +10869,11 @@ export class AgentSession {
 	 */
 	getAdvisorAgent(): Agent | undefined {
 		return this.#advisors.getAdvisorAgent();
+	}
+
+	/** WATCHDOG.yml problems from startup discovery; shown by the UI once it is ready. */
+	getAdvisorConfigWarnings(): readonly string[] {
+		return this.#advisors.configWarnings;
 	}
 
 	/**
