@@ -823,10 +823,6 @@ export class CustomEditor extends Editor {
 	onCycleModelBackward?: () => void;
 	onCycleAgentForward?: () => void;
 	onSelectModel?: () => void;
-	onToggleToolActivity?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
-	onHistorySearch?: () => void;
 	onSuspend?: () => void;
 	onSelectModelTemporary?: () => void;
 	/** Called when the configured copy-prompt shortcut is pressed. */
@@ -1151,12 +1147,6 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured external editor shortcut
-			if (this.#matchesAction(canonical, "app.editor.external") && this.onExternalEditor) {
-				this.onExternalEditor();
-				return;
-			}
-
 			// Intercept configured temporary model selector shortcut
 			if (this.#matchesAction(canonical, "app.model.selectTemporary") && this.onSelectModelTemporary) {
 				this.onSelectModelTemporary();
@@ -1175,27 +1165,9 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured thinking block visibility toggle
-			if (this.#matchesAction(canonical, "app.thinking.toggle") && this.onToggleThinking) {
-				this.onToggleThinking();
-				return;
-			}
-
 			// Intercept configured model selector shortcut
 			if (this.#matchesAction(canonical, "app.model.select") && this.onSelectModel) {
 				this.onSelectModel();
-				return;
-			}
-
-			// Intercept configured history search shortcut
-			if (this.#matchesAction(canonical, "app.history.search") && this.onHistorySearch) {
-				this.onHistorySearch();
-				return;
-			}
-
-			// Intercept configured tool activity visibility toggle
-			if (this.#matchesAction(canonical, "app.tools.toggleVisibility") && this.onToggleToolActivity) {
-				this.onToggleToolActivity();
 				return;
 			}
 
@@ -1248,10 +1220,34 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured exit shortcut. Always consume the shortcut so it
-			// never reaches the parent handler; firing onExit is the controller's
-			// chance to snapshot the current text as a draft before shutting down.
+			// Intercept configured exit shortcut. When the key doubles as
+			// forward-delete (readline ^D: the default app.exit binding overlaps
+			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
+			// the delete here instead of quitting. Invoking the operation directly
+			// — not falling through, not redispatching the raw key — keeps the
+			// exit chord's precedence slot on both sides: a later app action or
+			// extension handler bound to the same chord cannot steal it, and
+			// neither can an earlier base-editor action (e.g. a user-bound
+			// tui.input.submit, which Editor.handleInput checks before
+			// deleteCharForward). Only an empty buffer exits; firing onExit is
+			// the controller's chance to snapshot the current text as a draft
+			// before shutting down. Exit keys with no forward-delete role always
+			// exit. Draft presence is read off the buffer alone: attachments live
+			// as inline chip tokens, while `pendingImages` / `pendingTexts`
+			// intentionally retain deleted records so numbering isn't recycled
+			// (see composerChips) — trusting them would make Ctrl+D a permanent
+			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
+				const doublesAsForwardDelete =
+					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
+				if (doublesAsForwardDelete && !this.textEquals("")) {
+					this.deleteCharForward();
+					// Same post-edit normalization the parent dispatch runs below: an edit that
+					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later
+					// typing lands on the Queueing label instead of the queue body.
+					this.#normalizeQueuePrefix(hadBareQueuePrefix);
+					return;
+				}
 				this.onExit?.();
 				return;
 			}
@@ -1292,23 +1288,28 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		this.#forwardInput(data);
-		if (!hadBareQueuePrefix && (this.textEquals("->") || this.textEquals("=>"))) {
-			const cursor = this.getCursor();
-			if (cursor.line === 0 && cursor.col === 2) {
-				this.insertText("\n");
-			}
+		this.#normalizeQueuePrefix(hadBareQueuePrefix);
+	}
+
+	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
+	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
+	 *  already just the prefix is left alone so the user can keep editing it. */
+	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
+		const cursor = this.getCursor();
+		if (cursor.line === 0 && cursor.col === 2) {
+			this.insertText("\n");
 		}
 	}
 
 	/**
 	 * Route a keystroke through the base text-editor pipeline only, skipping the
-	 * app-level shortcut interception in {@link handleInput} (Agent Hub, model
-	 * selector, history search, external editor, …). Used when the editor is
-	 * mounted for draft editing beneath another focused surface — e.g. an Ask
-	 * dialog opened over a non-empty prompt — so finishing or submitting the
-	 * draft can never fire an editor-slot shortcut that clears `editorContainer`
-	 * and orphans the overlay. Only text editing, cursor movement, submission,
-	 * and the clear action reach the buffer.
+	 * editor-scoped shortcut interception in {@link handleInput}. Used when the
+	 * editor is mounted for draft editing beneath another focused surface — e.g.
+	 * an Ask dialog opened over a non-empty prompt — so finishing or submitting
+	 * the draft cannot fire an editor-slot shortcut that clears
+	 * `editorContainer` and orphans the overlay. Only text editing, cursor
+	 * movement, submission, and the clear action reach the buffer.
 	 */
 	handleDraftEdit(data: string): void {
 		// The base editor reserves Ctrl+C for parent handling and returns without
