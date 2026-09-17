@@ -356,6 +356,10 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			"Content-Type": "application/json",
 			"User-Agent": userAgent,
 			...(options.claudeCodeSessionId ? { "X-Claude-Code-Session-Id": options.claudeCodeSessionId } : {}),
+			// Gateways such as OmniRoute key session affinity on x-session-id; the per-request billing hash in the system prompt defeats their content-hash fallback.
+			...(options.claudeCodeSessionId && !isOfficialAnthropicApiUrl(options.baseUrl)
+				? { "x-session-id": options.claudeCodeSessionId }
+				: {}),
 			...claudeCodeHeaders,
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			"anthropic-dangerous-direct-browser-access": "true",
