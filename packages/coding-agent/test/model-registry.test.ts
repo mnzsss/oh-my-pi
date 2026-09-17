@@ -361,18 +361,18 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("overriding headers merges with model headers", () => {
+		test("overriding headers merges with model headers", async () => {
 			const anthropicModels = getModelsForProvider(anthropicProxyHeaders, "anthropic");
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-value");
+				expect((await anthropicProxyHeaders.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-value");
 			}
 		});
 
-		test("headers-only override applies to built-in models", () => {
+		test("headers-only override applies to built-in models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicHeadersOnly, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-only");
+				expect((await anthropicHeadersOnly.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-only");
 			}
 		});
 
@@ -383,20 +383,21 @@ describe("ModelRegistry", () => {
 			expect(model?.supportsComputerUse).toBe(false);
 		});
 
-		test("provider header lookup excludes unrelated model overrides", () => {
-			expect(xaiModelScopedHeaders.find("xai", otherXaiModelId)?.headers?.["X-Model-Tenant"]).toBe(
+		test("provider header lookup excludes unrelated model overrides", async () => {
+			const model = xaiModelScopedHeaders.find("xai", otherXaiModelId);
+			expect(model && (await xaiModelScopedHeaders.resolveModelHeaders(model))?.["X-Model-Tenant"]).toBe(
 				"other-model-tenant",
 			);
-			expect({ ...xaiModelScopedHeaders.getProviderHeaders("xai") }).toEqual({
+			expect({ ...(await xaiModelScopedHeaders.getProviderHeaders("xai")) }).toEqual({
 				"X-Provider-Tenant": "search-tenant",
 			});
 		});
 
-		test("authHeader override applies bearer auth to built-in models without custom models", () => {
+		test("authHeader override applies bearer auth to built-in models without custom models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicAuthHeader, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.Authorization).toBe("Bearer issue-929-key");
+				expect((await anthropicAuthHeader.resolveModelHeaders(model))?.Authorization).toBe("Bearer issue-929-key");
 			}
 		});
 
@@ -1265,11 +1266,12 @@ describe("ModelRegistry", () => {
 			expect(sonnetModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
-		test("custom same-id replacement does not keep bundled headers", () => {
+		test("custom same-id replacement does not keep bundled headers", async () => {
 			const model = copilotReplace.find("github-copilot", "gpt-4o");
-			expect(model?.headers).toEqual({ "X-Proxy": "proxy" });
-			expect(model?.headers?.["User-Agent"]).toBeUndefined();
-			expect(model?.headers?.["Editor-Version"]).toBeUndefined();
+			const headers = model ? await copilotReplace.resolveModelHeaders(model) : undefined;
+			expect(headers).toEqual({ "X-Proxy": "proxy" });
+			expect(headers?.["User-Agent"]).toBeUndefined();
+			expect(headers?.["Editor-Version"]).toBeUndefined();
 		});
 
 		test("custom provider with same name as built-in does not affect other built-in providers", () => {
@@ -1463,8 +1465,9 @@ describe("ModelRegistry", () => {
 
 			const discovered = registry.find("openai", "gpt-5.5");
 			expect(discovered?.baseUrl).toBe("https://provider.example.com/v1");
-			expect(discovered?.headers?.["X-Provider"]).toBe("provider");
-			expect(discovered?.headers?.["X-Model"]).toBeUndefined();
+			const headers = discovered ? await registry.resolveModelHeaders(discovered) : undefined;
+			expect(headers?.["X-Provider"]).toBe("provider");
+			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
@@ -1859,9 +1862,9 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("model override can add headers", () => {
+		test("model override can add headers", async () => {
 			const sonnet = getModelsForProvider(addHeaders, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.headers?.["X-Custom-Model-Header"]).toBe("value");
+			expect(sonnet && (await addHeaders.resolveModelHeaders(sonnet))?.["X-Custom-Model-Header"]).toBe("value");
 		});
 
 		test("refresh() picks up model override changes", async () => {
@@ -2504,7 +2507,7 @@ describe("ModelRegistry", () => {
 			expect(model?.guardrailTrace).toBeUndefined();
 		});
 
-		test("transport and header overrides apply to a synthesized ARN model", () => {
+		test("transport and header overrides apply to a synthesized ARN model", async () => {
 			const transportOverride = readonlyRegistry({
 				providers: {
 					"amazon-bedrock": {
@@ -2518,7 +2521,9 @@ describe("ModelRegistry", () => {
 			const model = transportOverride.find("amazon-bedrock", profileArn);
 			expect(model).toBeDefined();
 			expect(model?.transport).toBe("pi-native");
-			expect(model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+			expect(model && (await transportOverride.resolveModelHeaders(model))).toEqual({
+				"X-Custom-Header": "custom-value",
+			});
 			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 		});
 	});
