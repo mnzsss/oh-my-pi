@@ -2225,6 +2225,7 @@ export async function compact<TMessage = Message>(
 			truncatedChars,
 			includedPreviousSummary,
 			files: files.length > 0 ? files : undefined,
+			includeThinking: options?.includeThinking !== false,
 		});
 	}
 
