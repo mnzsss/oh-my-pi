@@ -56,6 +56,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	ImageContent,
+	Judge,
 	Message,
 	MessageAttribution,
 	Model,
@@ -122,6 +123,7 @@ import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
+import { formatEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
@@ -151,7 +153,7 @@ import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import type { HookCommandContext } from "../extensibility/hooks/types";
+import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -159,6 +161,7 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -206,7 +209,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -337,6 +340,7 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
+	isTitleContextReply,
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
@@ -703,6 +707,11 @@ export class AgentSession {
 	#titleSystemPrompt: string | undefined;
 	#titleGenerationStart: (() => (() => void) | void) | undefined;
 	#titleGenerationInFlightFor: string | undefined;
+	/** First-message auto-title that may be retried from conversation context.
+	 *  Once the title model declines the message (greeting-like or too ambiguous,
+	 *  e.g. a pasted image plus "help") AND the assistant has replied, the title is
+	 *  regenerated once from the recent user/assistant/thinking turns. */
+	#deferredTitle: { sessionId: string; declined: boolean; replied: boolean } | undefined;
 	#titleProviderSessionId: string | undefined;
 	#titleProviderParentSessionId: string | undefined;
 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
@@ -714,6 +723,7 @@ export class AgentSession {
 	readonly #bash: BashRunner;
 
 	readonly #eval: EvalRunner;
+	readonly #evalToolSession: ToolSession | undefined;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1357,6 +1367,9 @@ export class AgentSession {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 			parentSessionId: config.parentEvalSessionId,
 		});
+		this.#evalToolSession = config.evalToolSession;
+		const initialEvalStateContext = this.#buildEvalStateContextMessage();
+		if (initialEvalStateContext) this.agent.appendMessage(initialEvalStateContext);
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1733,8 +1746,12 @@ export class AgentSession {
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
+			ruleJudge: () => this.ruleJudge(),
+			deliverRuleWarning: (content, ruleNames) => this.#deliverRuleWarning(content, ruleNames),
+			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.#obfuscator = config.obfuscator;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
@@ -2451,6 +2468,38 @@ export class AgentSession {
 		});
 	}
 
+	/**
+	 * Judge for TTSR `question` rules per `ttsr.judge`, used by live judging and
+	 * `/omfg` validation. `auto` requires the judge role to resolve to a native
+	 * System One model, since every completed output may cost a request. Rebuilt
+	 * per call so model, credential, and session switches apply.
+	 */
+	ruleJudge(): Judge | undefined {
+		const mode = this.settings.get("ttsr.judge");
+		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry))) return undefined;
+		return resolveJudge({
+			settings: this.settings,
+			registry: this.#modelRegistry,
+			sessionModel: this.model,
+			sessionId: this.sessionId,
+			metadataResolver: provider => this.agent.metadataForProvider(provider),
+			onUsage: journalJudgmentUsage(this.sessionManager, "ttsr"),
+		});
+	}
+
+	/**
+	 * Non-interrupting delivery: mid-run the warning joins the next step; an idle
+	 * session starts a turn so the agent can act on it. Persisting the message
+	 * records the rules as injected (see #persistMessageEnd).
+	 */
+	async #deliverRuleWarning(content: string, ruleNames: string[]): Promise<void> {
+		if (this.#isDisposed) return;
+		await this.sendCustomMessage(
+			{ customType: "ttsr-injection", content, display: false, details: { rules: ruleNames }, attribution: "agent" },
+			{ deliverAs: "aside" },
+		);
+	}
+
 	async #formatAsyncResultForFollowUp(result: string, meta?: OutputMeta): Promise<string> {
 		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
 			return result;
@@ -3091,6 +3140,7 @@ export class AgentSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			if (this.#deferredTitle && isTitleContextReply(event.message)) this.#advanceDeferredTitle("replied");
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
 		// persisted message BEFORE the obfuscator's display-side copy below, so the
@@ -3340,7 +3390,7 @@ export class AgentSession {
 				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
 				// Broker deployments: report this request's burn so the broker can
 				// attribute token usage per install. No-op with a local auth store.
-				this.#modelRegistry.authStorage.recordObservedUsage({
+				this.#modelRegistry.authStorage.usage.observe({
 					provider: assistantMsg.provider,
 					model: assistantMsg.model,
 					at: assistantMsg.timestamp,
@@ -3506,7 +3556,7 @@ export class AgentSession {
 					!isConcurrencyCap &&
 					!AIError.isGitHubCopilotPolicyDenial(msg.provider, msg.errorStatus, msg.errorMessage)
 				) {
-					await this.#modelRegistry.authStorage.remove("github-copilot");
+					await this.#modelRegistry.authStorage.credentials.remove("github-copilot");
 				}
 			}
 
@@ -4423,6 +4473,7 @@ export class AgentSession {
 				from: event.from,
 				to: event.to,
 				role: event.role,
+				reason: event.reason,
 			});
 		} else if (event.type === "retry_fallback_succeeded") {
 			await this.#extensionRunner.emit({
@@ -5687,7 +5738,39 @@ export class AgentSession {
 	}
 
 	buildDisplaySessionContext(): SessionContext {
-		return this.#providerBoundary.buildDisplaySessionContext();
+		return this.#withEvalStateContext(this.#providerBoundary.buildDisplaySessionContext());
+	}
+
+	#withEvalStateContext(context: SessionContext): SessionContext {
+		const evalStateContext = this.#buildEvalStateContextMessage();
+		if (!evalStateContext) return context;
+		return { ...context, messages: [...context.messages, evalStateContext] };
+	}
+
+	#buildEvalStateContextMessage(): CustomMessage | undefined {
+		const session = this.#evalToolSession;
+		if (!session) return undefined;
+		const historyHasEval = this.sessionManager.getBranch().some(entry => {
+			if (entry.type !== "message") return false;
+			const message = entry.message;
+			if (message.role === "pythonExecution" || (message.role === "toolResult" && message.toolName === "eval")) {
+				return true;
+			}
+			return (
+				message.role === "assistant" &&
+				message.content.some(block => block.type === "toolCall" && block.name === "eval")
+			);
+		});
+		const content = formatEvalStateContext(session, { historyHasEval });
+		if (!content) return undefined;
+		return {
+			role: "custom",
+			customType: "eval-state-context",
+			content,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
 	}
 
 	/**
@@ -6204,12 +6287,13 @@ export class AgentSession {
 
 	/**
 	 * Emit source paths for file-backed attachments (path-pasted/drag-and-dropped
-	 * images, video contact-sheet previews) as hidden user context. The visible
-	 * message deliberately contains only its `[Image #N]`/`[Video #N]` marker and
-	 * the attachment itself, while the agent gets the path required to act on the
-	 * original file (e.g. `read`, or video frame subselectors) without exposing
-	 * the user's filesystem layout in the TUI. Clipboard bitmaps have no backing
-	 * file and are skipped — no path is invented for them.
+	 * images, clipboard images committed to the session artifact directory, video
+	 * contact-sheet previews) as hidden user context. The visible message
+	 * deliberately contains only its `[Image #N]`/`[Video #N]` marker and the
+	 * attachment itself, while the agent gets the path required to act on the file
+	 * (e.g. `read`, uploads, or video frame subselectors) without exposing the
+	 * user's filesystem layout in the TUI. Attachments without a file on disk are
+	 * skipped — no path is invented for them.
 	 */
 	#createAttachmentSourceNotices(images: readonly ImageContent[] | undefined, timestamp: number): CustomMessage[] {
 		if (!images?.length) return [];
@@ -7140,11 +7224,11 @@ export class AgentSession {
 		const ctx = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as HookCommandContext;
+		} as unknown as CustomCommandContext;
 
 		try {
 			const args = parseCommandArgs(argsString);
-			const result = await loaded.command.execute(args, ctx);
+			const result = await loaded.command.execute(args, ctx, argsString);
 			// If result is a string, it's a prompt to send to LLM
 			// If void/undefined, command handled everything
 			return result ?? "";
@@ -8080,17 +8164,28 @@ export class AgentSession {
 		) {
 			return;
 		}
+		this.#deferredTitle = { sessionId, declined: false, replied: false };
+		this.#startAutoTitle(firstMessage, sessionId, onStart ?? this.#titleGenerationStart);
+	}
+
+	/**
+	 * Run one automatic title generation for `sessionId`, applying the result
+	 * unless the session was renamed or replaced meanwhile. A settled request
+	 * that left the session unnamed advances {@link #deferredTitle}.
+	 */
+	#startAutoTitle(input: string, sessionId: string, onStart: (() => (() => void) | void) | undefined): void {
 		this.#titleGenerationInFlightFor = sessionId;
 		let cleanupProgress: (() => void) | void;
 		try {
-			cleanupProgress = (onStart ?? this.#titleGenerationStart)?.();
+			cleanupProgress = onStart?.();
 		} catch (error) {
 			if (this.#titleGenerationInFlightFor === sessionId) {
 				this.#titleGenerationInFlightFor = undefined;
 			}
 			throw error;
 		}
-		this.generateTitle(firstMessage)
+		const signal = this.#titleGenerationAbortController.signal;
+		this.generateTitle(input)
 			.then(async title => {
 				// Re-check after generation so a later completion cannot replace
 				// the first title, and a request from a replaced session cannot
@@ -8112,7 +8207,33 @@ export class AgentSession {
 					this.#titleGenerationInFlightFor = undefined;
 				}
 				cleanupProgress?.();
+				// An interrupted request is cancelled inference, not a decline.
+				if (signal.aborted) this.#deferredTitle = undefined;
+				else this.#advanceDeferredTitle("declined");
 			});
+	}
+
+	/**
+	 * Record one half of the deferred-title condition; once the title model has
+	 * declined and the assistant has replied, retitle from conversation context.
+	 * The retry runs at most once per deferral, so a still-ambiguous exchange
+	 * waits for the next user message instead of retrying every assistant turn.
+	 */
+	#advanceDeferredTitle(step: "declined" | "replied"): void {
+		const deferred = this.#deferredTitle;
+		if (!deferred) return;
+		const sessionId = this.sessionManager.getSessionId();
+		if (deferred.sessionId !== sessionId || this.sessionName) {
+			this.#deferredTitle = undefined;
+			return;
+		}
+		deferred[step] = true;
+		if (!deferred.declined || !deferred.replied) return;
+		this.#deferredTitle = undefined;
+		if (this.#titleGenerationInFlightFor === sessionId || $env.PI_NO_TITLE) return;
+		const context = this.#buildReplanTitleContext();
+		if (!context || isLowSignalTitleInput(context)) return;
+		this.#startAutoTitle(context, sessionId, this.#titleGenerationStart);
 	}
 
 	#resolveTitleProviderSessionId(parentSessionId: string): string {
@@ -10405,7 +10526,7 @@ export class AgentSession {
 
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext();
-		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
+		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
@@ -10607,8 +10728,8 @@ export class AgentSession {
 
 	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
 		const authStorage = this.#modelRegistry.authStorage;
-		if (!authStorage.fetchUsageReports) return null;
-		const reports = await authStorage.fetchUsageReports({
+		if (!authStorage.usage.reports) return null;
+		const reports = await authStorage.usage.reports({
 			baseUrlResolver: provider => {
 				if (provider === "google-antigravity") {
 					const mode = this.settings.get("providers.antigravityEndpoint");
@@ -10638,7 +10759,7 @@ export class AgentSession {
 		}
 		const selectors = new Set<string>();
 		for (const [provider, models] of modelsByProvider) {
-			const modelIds = this.#modelRegistry.authStorage.getUsageReportingModelIds(
+			const modelIds = this.#modelRegistry.authStorage.usage.reportingModelIds(
 				provider,
 				models.map(model => model.id),
 				reports,
@@ -10653,10 +10774,10 @@ export class AgentSession {
 		const provider = this.model?.provider;
 		if (!provider) return undefined;
 		const authStorage = this.#modelRegistry.authStorage;
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		return {
 			provider,
-			accounts: authStorage.listOAuthAccounts(provider, this.sessionId),
+			accounts: authStorage.oauth.accounts(provider, this.sessionId),
 		};
 	}
 
@@ -10667,7 +10788,7 @@ export class AgentSession {
 	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.pinSessionOAuthAccount(provider, this.sessionId, credentialId);
+		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
 	}
 
 	/**
@@ -10675,7 +10796,7 @@ export class AgentSession {
 	 * credential. Never throws for business outcomes — inspect `code`.
 	 */
 	async redeemResetCredit(target: ResetCreditTarget, signal?: AbortSignal): Promise<ResetCreditRedeemOutcome> {
-		return this.#modelRegistry.authStorage.redeemResetCredit({
+		return this.#modelRegistry.authStorage.resets.redeem({
 			target,
 			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
@@ -10693,11 +10814,11 @@ export class AgentSession {
 			signal,
 		};
 		if (provider) {
-			return this.#modelRegistry.authStorage.listResetCredits({ ...options, provider });
+			return this.#modelRegistry.authStorage.resets.list({ ...options, provider });
 		}
 		const [codex, claude] = await Promise.all([
-			this.#modelRegistry.authStorage.listResetCredits({ ...options, provider: "openai-codex" }),
-			this.#modelRegistry.authStorage.listResetCredits({ ...options, provider: "anthropic" }),
+			this.#modelRegistry.authStorage.resets.list({ ...options, provider: "openai-codex" }),
+			this.#modelRegistry.authStorage.resets.list({ ...options, provider: "anthropic" }),
 		]);
 		return [...codex, ...claude];
 	}
@@ -10861,7 +10982,7 @@ export class AgentSession {
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
 			let outcome: ResetCreditRedeemOutcome;
 			try {
-				outcome = await authStorage.redeemResetCredit({
+				outcome = await authStorage.resets.redeem({
 					target: action.target,
 					baseUrlResolver: candidate => this.#modelRegistry.getProviderBaseUrl?.(candidate),
 					// A caller abort must not leave a non-idempotent consume in an
@@ -10949,7 +11070,7 @@ export class AgentSession {
 		if (!shouldEvaluateCodexAutoRedeem(cfg.autoRedeem)) return false;
 		const coordinator = this.#resetCoordinator;
 		const authStorage = this.#modelRegistry.authStorage;
-		const identity = authStorage.getOAuthAccountIdentity(provider, this.sessionId);
+		const identity = authStorage.oauth.identity(provider, this.sessionId);
 		const identityValue = (identity?.accountId ?? identity?.email ?? identity?.orgId)?.trim().toLowerCase();
 		if (!identityValue) return false;
 		const accountKey = `${provider}|${identity?.orgId?.trim().toLowerCase() ?? "-"}|${identityValue}`;
@@ -10957,7 +11078,7 @@ export class AgentSession {
 		if (existing) return existing;
 
 		const run = (async (): Promise<boolean> => {
-			await authStorage.invalidateUsageCache(provider);
+			await authStorage.usage.invalidate(provider);
 			const reports = await this.fetchUsageReports();
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
 			const plan =
@@ -11016,7 +11137,7 @@ export class AgentSession {
 				try {
 					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "openai-codex");
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
-					const identity = this.#modelRegistry.authStorage.getOAuthAccountIdentity("openai-codex", this.sessionId);
+					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
 					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
 					if (
 						plan.actions.length > 0 &&
