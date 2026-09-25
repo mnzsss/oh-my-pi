@@ -133,6 +133,7 @@ import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
+import { cfgTaskDisabledAgents } from "../task/settings";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
@@ -1267,7 +1268,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				undefined,
 				this.session.effectiveExtensionRoots,
 			);
-			const disabled = new Set(this.settings.get("task.disabledAgents") ?? []);
+			const disabled = new Set(cfgTaskDisabledAgents.get(this.settings));
 			this.#configuredAgents = agents.filter(agent => !disabled.has(agent.name));
 		}
 		if (this.#configuredAgents.length === 0) {
